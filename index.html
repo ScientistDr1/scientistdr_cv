@@ -111,7 +111,7 @@ footer strong{color:var(--c1);}
 body.editing #ed-bar{display:block;}
 body.editing .wrap{padding-bottom:230px;}
 .ed-row{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;max-width:900px;margin-left:auto;margin-right:auto;}
-#ed-bar input[type=text]{flex:1 1 200px;min-width:0;padding:9px 12px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--text);font-size:.92rem;}
+#ed-bar input[type=text],#ed-bar input[type=email],#ed-bar input[type=password]{flex:1 1 200px;min-width:0;padding:9px 12px;border-radius:10px;border:1px solid var(--line);background:var(--bg);color:var(--text);font-size:.92rem;}
 #ed-bar button{border:0;border-radius:10px;padding:9px 13px;font-weight:700;font-size:.85rem;color:#fff;background:var(--c1);cursor:pointer;}
 #ed-bar button.alt{background:var(--c2);color:#062b27;}
 #ed-bar button.warn{background:var(--c4);color:#2e0a1c;}
@@ -287,20 +287,49 @@ body.editing [contenteditable="true"]:focus{outline:2px solid var(--c3);}
     <button id="ed-export">Export file</button>
     <button id="ed-copy" class="alt">Copy HTML</button>
     <button id="ed-photo" class="alt">Change photo</button>
-    <button id="ed-reset" class="warn">Reset</button>
+    <button id="ed-reset" class="warn">Reload synced version</button>
     <button id="ed-done" class="warn">Done</button>
+  </div>
+  <div class="ed-row" id="cloud-auth">
+    <input id="cloud-email" type="email" placeholder="Your sync email" autocomplete="username">
+    <input id="cloud-password" type="password" placeholder="Your sync password" autocomplete="current-password">
+    <button id="cloud-login" class="alt" type="button">Sign in to sync</button>
+    <button id="cloud-logout" class="warn" type="button" hidden>Sign out</button>
   </div>
   <div id="ed-msg" aria-live="polite"></div>
   <input id="ed-file" type="file" accept="image/*" hidden>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 (function(){
-var KEY='pf_alhassan_v2', body=document.body, wrap=document.querySelector('.wrap');
+var SUPABASE_URL='https://YOUR_PROJECT_REF.supabase.co';
+var SUPABASE_PUBLISHABLE_KEY='sb_publishable_REPLACE_WITH_YOUR_KEY';
+var body=document.body, wrap=document.querySelector('.wrap');
 var msg=document.getElementById('ed-msg'), cmd=document.getElementById('ed-cmd');
-function store(k,v){try{if(v===undefined)return localStorage.getItem(k);if(v===null)localStorage.removeItem(k);else localStorage.setItem(k,v);}catch(e){}return null;}
+var supabaseClient=null;
 function say(t){msg.textContent=t;}
-var saved=store(KEY); if(saved){wrap.innerHTML=saved;}
+function cloudConfigured(){return SUPABASE_URL.indexOf('YOUR_PROJECT_REF')===-1&&SUPABASE_PUBLISHABLE_KEY.indexOf('REPLACE_WITH_YOUR_KEY')===-1;}
+function updateAuthUI(session){
+  var signedIn=!!(session&&session.user);
+  document.getElementById('cloud-email').hidden=signedIn;
+  document.getElementById('cloud-password').hidden=signedIn;
+  document.getElementById('cloud-login').hidden=signedIn;
+  document.getElementById('cloud-logout').hidden=!signedIn;
+  if(signedIn)say('Signed in as '+session.user.email+'. Changes will sync when you tap Save.');
+}
+async function loadCloud(){
+  if(!cloudConfigured()){say('Cloud sync setup is not finished. See SETUP-SYNC.md.');return;}
+  if(!window.supabase||!window.supabase.createClient){say('Could not load the sync service. Check your internet connection and reload.');return;}
+  try{
+    supabaseClient=window.supabase.createClient(SUPABASE_URL,SUPABASE_PUBLISHABLE_KEY);
+    var result=await supabaseClient.from('portfolio_content').select('html').eq('id','main').maybeSingle();
+    if(result.error){say('Could not load synced content: '+result.error.message);return;}
+    if(result.data&&result.data.html){wrap.innerHTML=result.data.html;say('Loaded the latest synced portfolio.');}
+    var auth=await supabaseClient.auth.getSession();updateAuthUI(auth.data.session);
+    if(!(auth.data.session&&auth.data.session.user))say('Portfolio is up to date. Sign in in edit mode to save changes.');
+  }catch(e){say('Could not connect to cloud sync. Check the setup and your internet connection.');}
+}
 var SEL='h1,.role,.badge,.contact span,.stat b,.stat span,h2,.card p,.job h3,.org,.when,li,.edu strong,.edu small,footer';
 var NETS={
  linkedin:{l:'LinkedIn',c:'#0a66c2',t:'in',b:'https://www.linkedin.com/in/'},
@@ -422,7 +451,16 @@ function refresh(){undecorate();decorate();}
 function enterEdit(){if(body.classList.contains('editing'))return;body.classList.add('editing');decorate();say('Edit mode on. Tap any text to change it. Type help in the box for commands.');}
 function exitEdit(){if(!body.classList.contains('editing'))return;save(true);undecorate();body.classList.remove('editing');try{if(location.hash==='#edit')history.replaceState(null,'',location.pathname+location.search);}catch(e){}}
 function clean(){resetRegs();undecorate();var h=wrap.innerHTML;if(body.classList.contains('editing'))decorate();return h;}
-function save(q){store(KEY,clean());if(!q)say('Saved in this browser. Use Export file to get a copy you can upload to your host.');}
+async function save(q){
+  if(!supabaseClient){say('Cloud sync is not ready. Check the setup guide and reload this page.');return false;}
+  var auth=await supabaseClient.auth.getSession(),session=auth.data&&auth.data.session;
+  if(!session){say('Sign in first, then tap Save again.');return false;}
+  var html=clean();
+  var result=await supabaseClient.from('portfolio_content').upsert({id:'main',html:html,updated_at:new Date().toISOString()},{onConflict:'id'});
+  if(result.error){say('Sync failed: '+result.error.message);return false;}
+  if(!q)say('Saved online. Your latest portfolio will load on your other devices.');
+  return true;
+}
 function buildFile(){
   var ed=body.classList.contains('editing'),m=msg.textContent,v=cmd.value;
   resetRegs();undecorate();body.classList.remove('editing');msg.textContent='';cmd.value='';
@@ -479,10 +517,23 @@ wrap.addEventListener('focusout',function(e){
 document.getElementById('ed-run').addEventListener('click',function(){runCmd(cmd.value);cmd.value='';});
 cmd.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();runCmd(cmd.value);cmd.value='';}});
 document.getElementById('ed-save').addEventListener('click',function(){save();});
+document.getElementById('cloud-login').addEventListener('click',async function(){
+  if(!supabaseClient){say('Cloud sync is not ready. Check the setup guide and reload this page.');return;}
+  var email=document.getElementById('cloud-email').value.trim();
+  var password=document.getElementById('cloud-password').value;
+  if(!email||!password){say('Enter the email and password created for your sync account.');return;}
+  var result=await supabaseClient.auth.signInWithPassword({email:email,password:password});
+  if(result.error){say('Sign-in failed: '+result.error.message);return;}
+  updateAuthUI(result.data.session);
+});
+document.getElementById('cloud-logout').addEventListener('click',async function(){
+  if(supabaseClient)await supabaseClient.auth.signOut();
+  updateAuthUI(null);say('Signed out.');
+});
 document.getElementById('ed-export').addEventListener('click',download);
 document.getElementById('ed-copy').addEventListener('click',copyHtml);
 document.getElementById('ed-done').addEventListener('click',exitEdit);
-document.getElementById('ed-reset').addEventListener('click',function(){store(KEY,null);location.reload();});
+document.getElementById('ed-reset').addEventListener('click',function(){location.reload();});
 var fi=document.getElementById('ed-file');
 document.getElementById('ed-photo').addEventListener('click',function(){fi.click();});
 fi.addEventListener('change',function(){
@@ -491,14 +542,17 @@ fi.addEventListener('change',function(){
     var s=Math.min(im.width,im.height),c=document.createElement('canvas');c.width=c.height=420;
     c.getContext('2d').drawImage(im,(im.width-s)/2,(im.height-s)*0.2,s,s,0,0,420,420);
     var ph=document.getElementById('photo'),i2=new Image();i2.alt='Portrait of Muhammad Yakubu Alhassan';i2.src=c.toDataURL('image/jpeg',0.86);
-    ph.textContent='';ph.appendChild(i2);say('Photo updated. Tap Save, then Export file.');};im.src=r.result;};
+    ph.textContent='';ph.appendChild(i2);say('Photo updated. Tap Save to sync it across devices.');};im.src=r.result;};
   r.readAsDataURL(f);
 });
 document.addEventListener('keydown',function(e){if(e.ctrlKey&&e.shiftKey&&(e.key==='E'||e.key==='e')){e.preventDefault();body.classList.contains('editing')?exitEdit():enterEdit();}});
 window.addEventListener('hashchange',function(){if(location.hash==='#edit')enterEdit();});
 socialsBox();
-if(location.hash==='#edit')enterEdit();
+loadCloud().then(function(){if(location.hash==='#edit')enterEdit();});
 })();
 </script>
 </body>
 </html>
+
+
+
